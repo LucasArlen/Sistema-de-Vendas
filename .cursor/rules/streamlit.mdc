@@ -1,0 +1,320 @@
+---
+description: 
+globs: 
+---
+# Sistema de Vendas - Documentação MVP
+
+## Estrutura do Projeto
+
+```
+src/
+├── core/
+│   ├── models.py       # Modelos de dados
+│   ├── database.py     # Conexão e queries
+│   └── services.py     # Regras de negócio
+├── ui/
+│   ├── pages/
+│   │   ├── vendas.py
+│   │   ├── clientes.py
+│   │   ├── saidas.py
+│   │   └── dashboard.py
+│   └── components.py   # Componentes reutilizáveis
+└── app.py             # Aplicação principal
+```
+
+## 1. Modelos (core/models.py)
+
+```python
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Optional
+
+@dataclass
+class Cliente:
+    nome: str
+    telefone: Optional[str] = None
+    id: Optional[int] = None
+
+    def __post_init__(self):
+        if not self.nome or len(self.nome) < 2:
+            raise ValueError("Nome inválido")
+        if self.telefone and not self.telefone.isdigit():
+            raise ValueError("Telefone deve conter apenas números")
+
+@dataclass
+class Venda:
+    cliente_id: int
+    valor: float
+    status: str  # "Pago" ou "Fiado"
+    data: datetime = field(default_factory=datetime.now)
+    id: Optional[int] = None
+
+    def __post_init__(self):
+        if self.valor <= 0:
+            raise ValueError("Valor deve ser maior que zero")
+        if self.status not in ["Pago", "Fiado"]:
+            raise ValueError("Status inválido")
+
+@dataclass
+class Saida:
+    descricao: str
+    valor: float
+    categoria: str
+    data: datetime = field(default_factory=datetime.now)
+    id: Optional[int] = None
+
+    CATEGORIAS = [
+        "Fornecedor",
+        "Funcionário",
+        "Manutenção",
+        "Outros"
+    ]
+
+    def __post_init__(self):
+        if not self.descricao:
+            raise ValueError("Descrição é obrigatória")
+        if self.valor <= 0:
+            raise ValueError("Valor deve ser maior que zero")
+        if self.categoria not in self.CATEGORIAS:
+            raise ValueError(f"Categoria inválida. Use: {', '.join(self.CATEGORIAS)}")
+```
+
+## 2. Banco de Dados (core/database.py)
+
+```python
+import sqlite3
+from contextlib import contextmanager
+from datetime import datetime
+from typing import List, Optional
+from .models import Cliente, Venda, Saida
+
+@contextmanager
+def get_db():
+    conn = sqlite3.connect('vendas.db')
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+def init_db():
+    with get_db() as conn:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS clientes (
+                id INTEGER PRIMARY KEY,
+                nome TEXT NOT NULL,
+                telefone TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS vendas (
+                id INTEGER PRIMARY KEY,
+                cliente_id INTEGER,
+                valor REAL NOT NULL,
+                status TEXT NOT NULL,
+                data DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (cliente_id) REFERENCES clientes (id)
+            );
+
+            CREATE TABLE IF NOT EXISTS saidas (
+                id INTEGER PRIMARY KEY,
+                descricao TEXT NOT NULL,
+                valor REAL NOT NULL,
+                categoria TEXT NOT NULL,
+                data DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+
+def cadastrar_cliente(cliente: Cliente) -> int:
+    with get_db() as conn:
+        cursor = conn.execute(
+            "INSERT INTO clientes (nome, telefone) VALUES (?, ?)",
+            (cliente.nome, cliente.telefone)
+        )
+        return cursor.lastrowid
+
+def registrar_venda(venda: Venda) -> int:
+    with get_db() as conn:
+        cursor = conn.execute(
+            "INSERT INTO vendas (cliente_id, valor, status) VALUES (?, ?, ?)",
+            (venda.cliente_id, venda.valor, venda.status)
+        )
+        return cursor.lastrowid
+
+def registrar_saida(saida: Saida) -> int:
+    with get_db() as conn:
+        cursor = conn.execute(
+            "INSERT INTO saidas (descricao, valor, categoria) VALUES (?, ?, ?)",
+            (saida.descricao, saida.valor, saida.categoria)
+        )
+        return cursor.lastrowid
+```
+
+## 3. Interface (ui/pages)
+
+### Dashboard (ui/pages/dashboard.py)
+
+```python
+import streamlit as st
+from ...core.database import get_db
+
+def render_dashboard():
+    st.title("Dashboard")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        vendas_dia = obter_vendas_dia()
+        st.metric("Vendas Hoje", f"R$ {vendas_dia:.2f}")
+    
+    with col2:
+        fiados = obter_total_fiado()
+        st.metric("Total Fiado", f"R$ {fiados:.2f}")
+    
+    with col3:
+        saidas = obter_saidas_dia()
+        st.metric("Saídas Hoje", f"R$ {saidas:.2f}")
+
+def obter_vendas_dia():
+    with get_db() as conn:
+        result = conn.execute("""
+            SELECT COALESCE(SUM(valor), 0) 
+            FROM vendas 
+            WHERE DATE(data) = DATE('now')
+            AND status = 'Pago'
+        """).fetchone()
+        return result[0]
+
+def obter_total_fiado():
+    with get_db() as conn:
+        result = conn.execute("""
+            SELECT COALESCE(SUM(valor), 0) 
+            FROM vendas 
+            WHERE status = 'Fiado'
+        """).fetchone()
+        return result[0]
+
+def obter_saidas_dia():
+    with get_db() as conn:
+        result = conn.execute("""
+            SELECT COALESCE(SUM(valor), 0) 
+            FROM saidas 
+            WHERE DATE(data) = DATE('now')
+        """).fetchone()
+        return result[0]
+```
+
+### Vendas (ui/pages/vendas.py)
+
+```python
+import streamlit as st
+from ...core.models import Venda
+from ...core.database import registrar_venda, get_db
+
+def render_vendas():
+    st.title("Nova Venda")
+    
+    cliente_id = st.selectbox(
+        "Cliente",
+        options=obter_clientes(),
+        format_func=lambda x: obter_nome_cliente(x)
+    )
+    
+    valor = st.number_input("Valor", min_value=0.01, step=0.5)
+    status = st.selectbox("Status", ["Pago", "Fiado"])
+    
+    if st.button("Registrar Venda"):
+        try:
+            venda = Venda(
+                cliente_id=cliente_id,
+                valor=valor,
+                status=status
+            )
+            registrar_venda(venda)
+            st.success("Venda registrada com sucesso!")
+        except Exception as e:
+            st.error(f"Erro ao registrar venda: {str(e)}")
+
+def obter_clientes():
+    with get_db() as conn:
+        return [row[0] for row in conn.execute("SELECT id FROM clientes")]
+
+def obter_nome_cliente(id):
+    with get_db() as conn:
+        result = conn.execute(
+            "SELECT nome FROM clientes WHERE id = ?", 
+            [id]
+        ).fetchone()
+        return result[0] if result else "Cliente não encontrado"
+```
+
+## 4. Aplicação Principal (app.py)
+
+```python
+import streamlit as st
+from core.database import init_db
+from ui.pages.dashboard import render_dashboard
+from ui.pages.vendas import render_vendas
+from ui.pages.clientes import render_clientes
+from ui.pages.saidas import render_saidas
+
+def main():
+    st.set_page_config(
+        page_title="Sistema de Vendas",
+        layout="wide"
+    )
+    
+    # Inicializa banco de dados
+    init_db()
+    
+    # Menu lateral
+    menu = st.sidebar.selectbox(
+        "Menu",
+        ["Dashboard", "Nova Venda", "Clientes", "Saídas"]
+    )
+    
+    # Renderiza página selecionada
+    if menu == "Dashboard":
+        render_dashboard()
+    elif menu == "Nova Venda":
+        render_vendas()
+    elif menu == "Clientes":
+        render_clientes()
+    elif menu == "Saídas":
+        render_saidas()
+
+if __name__ == "__main__":
+    main()
+```
+
+## Execução
+
+1. Instale as dependências:
+```bash
+pip install streamlit pandas sqlite3
+```
+
+2. Execute o aplicativo:
+```bash
+streamlit run app.py
+```
+
+## Próximos Passos
+
+1. Autenticação de usuários
+2. Relatórios e exportação de dados
+3. Backup automático
+4. Sistema de impressão
+5. Melhorias na interface
+6. Mais validações de dados
+7. Histórico de alterações
+8. Gestão de estoque
+
+---
+
+Este MVP fornece as funcionalidades básicas necessárias para:
+- Registrar vendas (à vista e fiado)
+- Gerenciar clientes
+- Controlar saídas/despesas
+- Visualizar métricas básicas
+
+A estrutura é modular e permite fácil expansão conforme necessário. 

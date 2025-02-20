@@ -1,0 +1,16 @@
+database:
+  path: vendas.db
+  backup_dir: backups
+
+logging:
+  level: INFO
+  dir: logs
+
+app:
+  title: "Sistema de Vendas"
+  layout: "wide"
+  theme:
+    primaryColor: "#FF4B4B"
+    backgroundColor: "#FFFFFF"
+    secondaryBackgroundColor: "#F0F2F6"
+    textColor: "#262730"
